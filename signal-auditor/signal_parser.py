@@ -18,7 +18,9 @@ MAIN_RE = re.compile(
     rf"({_DIR_WORDS})\b",
     re.IGNORECASE,
 )
-EXPIRY_RE = re.compile(r"(\d{1,2})\s*-?\s*min(?:ute)?s?\b|\bM(\d{1,2})\b", re.IGNORECASE)
+# Result lines in the channel's report posts, e.g. "USD/MXN;08:20;PUT->GAIN ✅"
+RESULT_RE = re.compile(MAIN_RE.pattern + r"\s*-*>\s*(GAIN|WIN|LOSS|LOSE)", re.IGNORECASE)
+EXPIRY_RE =re.compile(r"(\d{1,2})\s*-?\s*min(?:ute)?s?\b|\bM(\d{1,2})\b", re.IGNORECASE)
 GALE_RE = re.compile(r"GALE\D{0,20}?(\d{1,2}:\d{2})", re.IGNORECASE)
 LOOKS_LIKE_SIGNAL_RE = re.compile(rf"\b({_DIR_WORDS})\b", re.IGNORECASE)
 
@@ -32,6 +34,34 @@ class Signal:
     gales: int = 0       # each gale enters when the previous trade expires
     otc_flag: bool = False
     parsed_by: str = "regex"
+
+
+@dataclass
+class Claim:
+    pair: str
+    hhmm: str
+    direction: str
+    claim: str           # "GAIN" or "LOSS"
+
+
+INVISIBLE_RE = re.compile("[​‌‍⁠﻿]")
+
+
+def clean(text):
+    return INVISIBLE_RE.sub("", text or "")
+
+
+def parse_results(text):
+    """Claimed results from a channel report post; [] if the message isn't one."""
+    claims = []
+    for base, quote, hhmm, word, res in RESULT_RE.findall(clean(text)):
+        claims.append(Claim(
+            pair=f"{base.upper()}/{quote.upper()}",
+            hhmm=hhmm.zfill(5),
+            direction=DIRECTIONS[word.upper()],
+            claim="GAIN" if res.upper() in ("GAIN", "WIN") else "LOSS",
+        ))
+    return claims
 
 
 def parse_regex(text):
@@ -91,7 +121,8 @@ def parse_gemini(text):
 
 
 def parse(text):
-    if not text:
+    text = clean(text)
+    if not text or RESULT_RE.search(text):  # result reports are not new signals
         return None
     return parse_regex(text) or parse_gemini(text)
 

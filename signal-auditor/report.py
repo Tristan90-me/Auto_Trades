@@ -2,7 +2,7 @@
 import json
 import math
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 import db
@@ -23,6 +23,7 @@ def stats(rows):
     s = {
         "signals": len(rows),
         "by_market": defaultdict(int),
+        "by_direction": defaultdict(int),
         "pending": 0, "no_data": 0,
         "scored": 0, "first_wins": 0, "first_decided": 0,
         "outcomes": defaultdict(int),
@@ -33,6 +34,7 @@ def stats(rows):
     }
     for r in rows:
         s["by_market"][r["market"]] += 1
+        s["by_direction"][r["direction"]] += 1
         if r["status"] == "pending":
             s["pending"] += 1
         if r["status"] == "no_data":
@@ -64,7 +66,8 @@ def _pct(x):
 
 
 def format_section(title, s):
-    lines = [f"**{title}**", f"Signals received: {s['signals']}"]
+    lines = [f"**{title}**", f"Signals received: {s['signals']} "
+             f"({s['by_direction'].get('CALL', 0)} CALL / {s['by_direction'].get('PUT', 0)} PUT)"]
     m = s["by_market"]
     lines.append(f"  real-market: {m.get('real', 0)} | OTC: {m.get('otc', 0)} | exotic/unverifiable: {m.get('unverifiable', 0)}")
     if s["pending"] or s["no_data"]:
@@ -97,6 +100,44 @@ def format_section(title, s):
     return "\n".join(lines)
 
 
+def match_claims(signals, claims):
+    """Pair each signal with the channel's latest reported result for it (same pair and
+    entry time, reported within 24h). Returns {signal id: "GAIN"|"LOSS"}."""
+    by_key = defaultdict(list)
+    for c in claims:
+        by_key[(c["pair"], c["hhmm"])].append(c)
+    matched = {}
+    for s in signals:
+        entry = datetime.fromisoformat(json.loads(s["entries_json"])[0])
+        local = entry + timedelta(hours=s["utc_offset"] or 0)
+        posted = datetime.fromisoformat(s["posted_utc"])
+        found = [c for c in by_key.get((s["pair"], local.strftime("%H:%M")), [])
+                 if timedelta(0) <= datetime.fromisoformat(c["posted_utc"]) - posted <= timedelta(hours=24)]
+        if found:
+            matched[s["id"]] = max(found, key=lambda c: c["posted_utc"])["claim"]
+    return matched
+
+
+def format_claims(signals, claims):
+    matched = match_claims(signals, claims)
+    if not matched:
+        return None
+    gains = sum(v == "GAIN" for v in matched.values())
+    lines = [
+        "**Channel's own reports vs. real prices**",
+        f"Channel reported {len(matched)} results: {gains} GAIN, {len(matched) - gains} LOSS "
+        f"({_pct(gains / len(matched))} 'win')",
+    ]
+    checked = [s for s in signals if s["id"] in matched and s["status"] == "scored"]
+    if checked:
+        agree = sum((matched[s["id"]] == "GAIN") == s["outcome"].startswith("win") for s in checked)
+        hidden = sum(matched[s["id"]] == "GAIN" and s["outcome"] == "loss" for s in checked)
+        lines.append(f"Of those, {len(checked)} could be checked: real prices agree on {agree}; "
+                     f"{hidden} reported GAIN were actually full losses (all gales lost)")
+    lines.append(f"{len(signals) - len(matched)} signals never appeared in a channel report.")
+    return "\n".join(lines)
+
+
 def analyst_notes(day_stats, all_stats):
     if not config.GEMINI_API_KEY or all_stats["scored"] == 0:
         return None
@@ -122,14 +163,18 @@ def analyst_notes(day_stats, all_stats):
 
 def build(conn=None, days=1):
     conn = conn or db.connect()
+    all_rows = db.all_signals(conn)
     day = stats(db.since(conn, days))
-    total = stats(db.all_signals(conn))
+    total = stats(all_rows)
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     parts = [
         f"📊 Signal audit — {date} (UTC)",
         format_section(f"Last {days} day(s)", day),
         format_section("All time", total),
     ]
+    claims_section = format_claims(all_rows, db.all_claims(conn))
+    if claims_section:
+        parts.append(claims_section)
     notes = analyst_notes(day, total)
     if notes:
         parts.append("**Analyst notes (Gemini)**\n" + notes)

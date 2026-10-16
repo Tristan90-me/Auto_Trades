@@ -28,11 +28,23 @@ CREATE TABLE IF NOT EXISTS signals (
     UNIQUE(channel_id, msg_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+-- The channel's own result posts ("USD/MXN;08:20;PUT->GAIN"), to compare with real prices
+CREATE TABLE IF NOT EXISTS claims (
+    channel_id INTEGER,
+    msg_id INTEGER,
+    posted_utc TEXT,
+    pair TEXT,
+    hhmm TEXT,              -- entry time in the channel's clock
+    direction TEXT,
+    claim TEXT,             -- GAIN | LOSS
+    UNIQUE(channel_id, msg_id, pair, hhmm)
+);
 """
 
 
 def connect():
-    conn = sqlite3.connect(config.DB_PATH)
+    # Scoring runs in a worker thread; only one thread touches the connection at a time.
+    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn
@@ -51,6 +63,18 @@ def insert_signal(conn, *, channel_id, msg_id, posted_utc, raw_text, sig, entrie
     )
     conn.commit()
     return cur.rowcount == 1
+
+
+def insert_claims(conn, *, channel_id, msg_id, posted_utc, claims):
+    conn.executemany(
+        "INSERT OR IGNORE INTO claims VALUES (?,?,?,?,?,?,?)",
+        [(channel_id, msg_id, posted_utc.isoformat(), c.pair, c.hhmm, c.direction, c.claim) for c in claims],
+    )
+    conn.commit()
+
+
+def all_claims(conn):
+    return conn.execute("SELECT * FROM claims ORDER BY posted_utc").fetchall()
 
 
 def pending(conn):

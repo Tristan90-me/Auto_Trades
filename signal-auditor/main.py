@@ -19,10 +19,14 @@ import signal_parser
 
 def ingest(conn, channel_id, message):
     text = message.message or ""
+    posted = message.date.astimezone(timezone.utc)
+    claims = signal_parser.parse_results(text)
+    if claims:
+        db.insert_claims(conn, channel_id=channel_id, msg_id=message.id, posted_utc=posted, claims=claims)
+        return False
     sig = signal_parser.parse(text)
     if sig is None:
         return False
-    posted = message.date.astimezone(timezone.utc)
     entries, offset = signal_parser.entry_times_utc(sig, posted, config.SIGNAL_UTC_OFFSET)
     if not entries:
         print(f"[skip] couldn't place entry time {sig.entry_hhmm} for message {message.id}")
