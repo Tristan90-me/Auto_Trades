@@ -1,0 +1,4 @@
+telethon>=1.36
+yfinance>=0.2.50
+python-dotenv>=1.0
+google-genai>=1.0

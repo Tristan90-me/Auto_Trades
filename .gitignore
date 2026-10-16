@@ -1,0 +1,14 @@
+# Secrets: API keys and your Telegram login
+.env
+*.session
+*.session-journal
+
+# Local data
+*.db
+*.db-journal
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
